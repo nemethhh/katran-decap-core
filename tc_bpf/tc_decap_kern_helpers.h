@@ -1,0 +1,153 @@
+/* Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; version 2 of the License.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along
+ * with this program; if not, write to the Free Software Foundation, Inc.,
+ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
+
+#ifndef __DECAP_KERN_HELPERS_H
+#define __DECAP_KERN_HELPERS_H
+
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_endian.h>
+
+#include "../include/decap_consts.h"
+
+__attribute__((__always_inline__)) static inline bool tc_decap_v6(
+    struct __sk_buff* skb,
+    void** data,
+    void** data_end,
+    bool inner_v4) {
+  __u64 flags = 0;
+  int adjust_len;
+
+  struct ethhdr* new_eth;
+  struct ethhdr* old_eth;
+  old_eth = *data;
+  new_eth = *data + sizeof(struct ipv6hdr);
+  memcpy(new_eth->h_source, old_eth->h_source, 6);
+  memcpy(new_eth->h_dest, old_eth->h_dest, 6);
+  if (inner_v4) {
+    new_eth->h_proto = BE_ETH_P_IP;
+  } else {
+    new_eth->h_proto = BE_ETH_P_IPV6;
+  }
+
+  flags |= BPF_F_ADJ_ROOM_FIXED_GSO;
+  adjust_len = (int)(sizeof(struct ipv6hdr));
+
+  if (bpf_skb_adjust_room(skb, -adjust_len, BPF_ADJ_ROOM_MAC, flags)) {
+    return false;
+  }
+
+  *data = (void*)(long)skb->data;
+  *data_end = (void*)(long)skb->data_end;
+  return true;
+}
+
+__attribute__((__always_inline__)) static inline bool
+tc_decap_v4(struct __sk_buff* skb, void** data, void** data_end) {
+  __u64 flags = 0;
+  int adjust_len;
+
+  struct ethhdr* new_eth;
+  struct ethhdr* old_eth;
+  old_eth = *data;
+  new_eth = *data + sizeof(struct iphdr);
+  memcpy(new_eth->h_source, old_eth->h_source, 6);
+  memcpy(new_eth->h_dest, old_eth->h_dest, 6);
+  new_eth->h_proto = BE_ETH_P_IP;
+
+  flags |= BPF_F_ADJ_ROOM_FIXED_GSO;
+  adjust_len = (int)(sizeof(struct iphdr));
+
+  if (bpf_skb_adjust_room(skb, -adjust_len, BPF_ADJ_ROOM_MAC, flags)) {
+    return false;
+  }
+
+  *data = (void*)(long)skb->data;
+  *data_end = (void*)(long)skb->data_end;
+  return true;
+}
+
+#ifdef INLINE_DECAP_GUE
+
+#ifndef RECORD_GUE_ROUTE
+#define RECORD_GUE_ROUTE(...) {}
+#endif
+
+__attribute__((__always_inline__)) static inline bool
+gue_tc_decap_v4(struct __sk_buff* skb, void** data, void** data_end) {
+  __u64 flags = 0;
+  int adjust_len;
+
+  struct ethhdr* new_eth;
+  struct ethhdr* old_eth;
+  old_eth = *data;
+  new_eth = *data + sizeof(struct iphdr) + sizeof(struct udphdr);
+  RECORD_GUE_ROUTE(old_eth, new_eth, *data_end, true, true);
+
+  flags |= BPF_F_ADJ_ROOM_FIXED_GSO;
+  adjust_len = (int)(sizeof(struct iphdr) + sizeof(struct udphdr));
+
+  if (bpf_skb_adjust_room(skb, -adjust_len, BPF_ADJ_ROOM_MAC, flags)) {
+    return false;
+  }
+
+  *data = (void*)(long)skb->data;
+  *data_end = (void*)(long)skb->data_end;
+  return true;
+}
+
+__attribute__((__always_inline__)) static inline bool gue_tc_decap_v6(
+    struct __sk_buff* skb,
+    void** data,
+    void** data_end,
+    bool inner_v4) {
+  __u64 flags = 0;
+  int adjust_len;
+
+  struct ethhdr* new_eth;
+  struct ethhdr* old_eth;
+  old_eth = *data;
+  new_eth = *data + sizeof(struct ipv6hdr) + sizeof(struct udphdr);
+  RECORD_GUE_ROUTE(old_eth, new_eth, *data_end, false, inner_v4);
+
+  if (inner_v4) {
+    // We need to first change the encap packet protocol to ETH_P_IP.
+    // We do this by calling bpf_skb_change_proto(skb, bpf_htons(ETH_P_IP), 0)
+    // This will pop the "sizeof(struct ipv6hdr) - sizeof(struct iphdr)"
+    // from the outer ipv6 header and it will also set
+    // skb->protocol = htons(ETH_P_IP);
+    bpf_skb_change_proto(skb, bpf_htons(ETH_P_IP), 0);
+    // We adjust the remaining length:
+    // len = sizeof(struct ipv6hdr) + sizeof(struct udphdr) +
+    // sizeof(struct ipv6hdr) - sizeof(struct iphdr),
+    // That makes len = sizeof(struct iphdr) + sizeof(struct iphdr)
+    adjust_len = (int)(sizeof(struct iphdr) + sizeof(struct udphdr));
+  } else {
+    adjust_len = (int)(sizeof(struct ipv6hdr) + sizeof(struct udphdr));
+  }
+
+  flags |= BPF_F_ADJ_ROOM_FIXED_GSO;
+
+  if (bpf_skb_adjust_room(skb, -adjust_len, BPF_ADJ_ROOM_MAC, flags)) {
+    return false;
+  }
+
+  *data = (void*)(long)skb->data;
+  *data_end = (void*)(long)skb->data_end;
+  return true;
+}
+#endif // of INLINE_DECAP_GUE
+
+#endif // of __DECAP_KERN_HELPERS_H
